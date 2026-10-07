@@ -1,0 +1,60 @@
+name: ix.dev e2e
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: ix-dev-e2e
+  cancel-in-progress: false
+
+jobs:
+  lifecycle:
+    runs-on: ubuntu-latest
+    env:
+      IX_TOKEN: ${{ secrets.IX_TOKEN }}
+    steps:
+      - name: Check out runner
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Install ix CLI
+        shell: bash
+        run: |
+          curl -fsSL https://ix.dev/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Run VM lifecycle check
+        id: e2e
+        continue-on-error: true
+        run: python3 ixdev.e2e.py --attempt "${GITHUB_RUN_ATTEMPT:-1}"
+      - name: Upload lifecycle logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ix-dev-e2e-${{ github.run_id }}
+          path: |
+            e2e-report.md
+            e2e-results.json
+            ixdev-e2e-attempt-*/
+          if-no-files-found: ignore
+      - name: Open or update failure issue
+        if: steps.e2e.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          body="$(cat e2e-report.md)"
+          body+=$'\n\nRun: https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}'
+          issue="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search '"ix.dev e2e failing" in:title' --json number --jq '.[0].number // empty')"
+          if [ -n "$issue" ]; then
+            gh issue edit "$issue" --repo "$GITHUB_REPOSITORY" --body "$body"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title 'ix.dev e2e failing' --body "$body"
+          fi
+      - name: Fail workflow after reporting
+        if: steps.e2e.outcome == 'failure'
+        run: exit 1
