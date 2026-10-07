@@ -48,7 +48,7 @@ jobs:
         run: |
           set -euo pipefail
           body="$(cat e2e-report.md)"
-          body+=$'\n\nRun: https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}'
+          body+=$'\n\nRun: https://github.com/'"$GITHUB_REPOSITORY"'/actions/runs/'"$GITHUB_RUN_ID"
           issue="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search '"ix.dev e2e failing" in:title' --json number --jq '.[0].number // empty')"
           if [ -n "$issue" ]; then
             gh issue edit "$issue" --repo "$GITHUB_REPOSITORY" --body "$body"
