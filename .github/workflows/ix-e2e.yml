@@ -4,6 +4,15 @@ on:
   schedule:
     - cron: '*/15 * * * *'
   workflow_dispatch:
+    inputs:
+      ix_server:
+        description: 'Endpoint to test, e.g. https://api.aws.ix.dev. Empty: repository variable IX_SERVER, else the CLI default (api.ix.dev).'
+        type: string
+        default: ''
+      ix_region:
+        description: 'Region to create VMs in, e.g. us-west-2. Empty: repository variable IX_REGION, else the CLI default.'
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -16,11 +25,35 @@ concurrency:
 jobs:
   lifecycle:
     runs-on: ubuntu-latest
-    env:
-      IX_TOKEN: ${{ secrets.IX_TOKEN }}
     steps:
       - name: Check out runner
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      # Unset (empty input, no repository variable) leaves IX_SERVER and
+      # IX_REGION unexported, which is the CLI default and what the public
+      # cron has always tested. An empty exported value is not "unset".
+      - name: Select the target
+        id: target
+        env:
+          IX_SERVER_SEL: ${{ inputs.ix_server || vars.IX_SERVER }}
+          IX_REGION_SEL: ${{ inputs.ix_region || vars.IX_REGION }}
+          OVERRIDE: ${{ inputs.ix_server != '' || inputs.ix_region != '' }}
+          # A non-default endpoint authenticates with its own token. Workflow
+          # inputs are not masked, so the token is a secret, never an input.
+          TOKEN_DEFAULT: ${{ secrets.IX_TOKEN }}
+          TOKEN_ALT: ${{ secrets.IX_TOKEN_ALT }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "$IX_SERVER_SEL" ]; then echo "IX_SERVER=$IX_SERVER_SEL" >> "$GITHUB_ENV"; fi
+          if [ -n "$IX_REGION_SEL" ]; then echo "IX_REGION=$IX_REGION_SEL" >> "$GITHUB_ENV"; fi
+          token="$TOKEN_DEFAULT"
+          # The verify-phase stack (*.aws.ix.dev) has its own accounts; once the
+          # production names point at the same database the default token works.
+          case "$IX_SERVER_SEL" in *.aws.ix.dev*) [ -z "$TOKEN_ALT" ] || token="$TOKEN_ALT" ;; esac
+          echo "::add-mask::$token"
+          echo "IX_TOKEN=$token" >> "$GITHUB_ENV"
+          echo "override=$OVERRIDE" >> "$GITHUB_OUTPUT"
+          echo "target: server=${IX_SERVER_SEL:-default} region=${IX_REGION_SEL:-default} override=$OVERRIDE"
       - name: Install ix CLI
         shell: bash
         run: |
@@ -41,7 +74,7 @@ jobs:
             ixdev-e2e-attempt-*/
           if-no-files-found: ignore
       - name: Open or update failure issue
-        if: steps.e2e.outcome == 'failure'
+        if: steps.e2e.outcome == 'failure' && steps.target.outputs.override != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
