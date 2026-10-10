@@ -43,7 +43,8 @@ class Runner:
     def skip(self,step):self.row(step,{'pass':False,'seconds':0,'error':'blocked by earlier lifecycle failure'})
     def cleanup(self):
         start=time.monotonic(); errors=[]
-        for name in self.names:
+        # Newest first: a fork cannot outlive-block its source, and the source cannot be deleted while a fork made from its snapshot has not booted.
+        for name in reversed(self.names):
             for attempt in range(3):
                 exists=next((v for v in self.inventory() if v['name']==name),None)
                 if not exists:break
@@ -62,7 +63,7 @@ class Runner:
             command='set -e; uname -a; df -h; test "$(nproc)" -eq 2; printf ixdev-e2e > /root/ixdev-e2e-witness'
             r=self.cmd('source-command',['ix','shell',source,'--noninteractive','--','sh','-c',command]);self.row(STEPS[2],r)
             if not r['pass']:return
-            start=time.monotonic();r=self.cmd('snapshot',['ix','snapshot','create',source,'--wait-durable'])
+            start=time.monotonic();r=self.cmd('snapshot',['ix','snapshot','create',source])
             if r['pass']:
                 listing=self.cmd('snapshot-list',['ix','snapshot','ls',source,'--output','json']);r=listing
                 if listing['pass']:
