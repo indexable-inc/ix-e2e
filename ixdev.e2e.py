@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import argparse,json,os,subprocess,time,uuid,pathlib,sys
+import argparse,json,os,re,subprocess,time,uuid,pathlib,sys
 ROOT=pathlib.Path(__file__).resolve().parent
 DATA=ROOT/'e2e-results.json'
 STEPS=['ix new','wait running','command in VM','fork via snapshot/new','command in fork','delete both VMs']
@@ -14,7 +14,7 @@ def measure():
 class Runner:
     def __init__(self,attempt):
         self.attempt=attempt; self.log=ROOT/f'ixdev-e2e-attempt-{attempt}'; self.log.mkdir(exist_ok=True)
-        self.names=[]; self.rows=[]
+        self.names=[]; self.rows=[]; self.snapshot=None
     def cmd(self,label,args,timeout=180):
         start=time.monotonic()
         try:
@@ -43,6 +43,16 @@ class Runner:
     def skip(self,step):self.row(step,{'pass':False,'seconds':0,'error':'blocked by earlier lifecycle failure'})
     def cleanup(self):
         start=time.monotonic(); errors=[]
+        # The snapshot first, naming its source VM (a key scoped to what it created cannot name a bare id, and nothing can
+        # once the VM is gone): every run leaked one until 2026-10-17. The fork keeps the record until its own rm below.
+        if self.snapshot:
+            deadline=time.monotonic()+180; delay=2
+            while True:
+                result=self.cmd('snapshot-rm',['ix','snapshot','rm',self.names[0],self.snapshot],120)
+                if result['pass']:break
+                if 'still publishing' not in result['stderr']+result['stdout'] or time.monotonic()+delay>deadline:
+                    errors.append('snapshot rm: '+result['error']);break
+                time.sleep(delay); delay=min(delay*2,15)
         # Newest first: a fork cannot outlive-block its source, and the source cannot be deleted while a fork made from its snapshot has not booted.
         for name in reversed(self.names):
             for attempt in range(3):
@@ -51,6 +61,7 @@ class Runner:
                 result=self.cmd('delete-'+name,['ix','rm','-f',name],60)
                 if not result['pass']:errors.append(result['error'])
         remaining=[v['name'] for v in self.inventory() if v['name'] in self.names]
+        if self.snapshot and any(e.startswith('snapshot rm:') for e in errors):remaining.append('snapshot '+self.snapshot)
         return {'pass':not remaining,'seconds':round(time.monotonic()-start,3),'error':('; '.join(errors)+'; remaining='+','.join(remaining)) if remaining else ''}
     def run(self):
         baseline=self.inventory(); (self.log/'baseline.json').write_text(json.dumps(baseline))
@@ -64,13 +75,15 @@ class Runner:
             r=self.cmd('source-command',['ix','shell',source,'--noninteractive','--','sh','-c',command]);self.row(STEPS[2],r)
             if not r['pass']:return
             start=time.monotonic();r=self.cmd('snapshot',['ix','snapshot','create',source])
+            created=re.search(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}',r['stdout']+r['stderr'])
+            if created:self.snapshot=created[0]
             if r['pass']:
                 listing=self.cmd('snapshot-list',['ix','snapshot','ls',source,'--output','json']);r=listing
                 if listing['pass']:
                     snapshots=json.loads(listing['stdout']); snapshots=snapshots.get('snapshots',[]) if isinstance(snapshots,dict) else snapshots
                     if not snapshots:r={'pass':False,'error':'snapshot list empty'}
                     else:
-                        sid=snapshots[0]['id'];r=self.cmd('fork',['ix','new',sid,'--name',fork,'--no-shell'])
+                        sid=snapshots[0]['id'];self.snapshot=sid;r=self.cmd('fork',['ix','new',sid,'--name',fork,'--no-shell'])
                         if r['pass']:r=self.wait(fork)
             r['seconds']=round(time.monotonic()-start,3);self.row(STEPS[3],r)
             if not r['pass']:return
